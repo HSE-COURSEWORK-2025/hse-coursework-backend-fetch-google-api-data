@@ -4,3 +4,4 @@ pydantic_core
 requests
 aioredis
 setuptools
+httpx

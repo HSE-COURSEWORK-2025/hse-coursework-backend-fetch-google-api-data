@@ -1,7 +1,7 @@
 import asyncio
 import argparse
+import logging
 import json
-import requests
 import sys
 import datetime
 import certifi
@@ -12,6 +12,19 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from typing import Dict, Optional
 
+from notifications import notifications_api
+import requests
+
+# Настройки
+settings = Settings()
+
+# Конфигурация логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger(__name__)
 
 FLOAT_TYPES = [
     "com.google.oxygen_saturation",
@@ -38,26 +51,23 @@ GOOGLE_TO_DATA_TYPE: Dict[str, str] = {
     # float-типы
     "com.google.oxygen_saturation":         "BloodOxygenData",
     "com.google.heart_rate.bpm":            "HeartRateRecord",
-    "com.google.height":                    "HeightRecord",              # ← придумали
+    "com.google.height":                    "HeightRecord",
     "com.google.weight":                    "WeightRecord",
 
     # int-типы
-    "com.google.activity.segment":          "ActivitySegmentRecord",     # ← придумали
+    "com.google.activity.segment":          "ActivitySegmentRecord",
     "com.google.activity.exercise":         "ExerciseSessionRecord",
     "com.google.calories.bmr":              "BasalMetabolicRateRecord",
     "com.google.calories.expended":         "TotalCaloriesBurnedRecord",
-    "com.google.cycling.pedaling.cadence":  "CadenceRecord",             # ← придумали
-    "com.google.cycling.pedaling.cumulative": "CumulativeCadenceRecord",  # ← придумали
-    "com.google.heart_minutes":             "HeartMinutesRecord",        # ← придумали
-    "com.google.active_minutes":            "ActiveMinutesRecord",       # ← придумали
+    "com.google.cycling.pedaling.cadence":  "CadenceRecord",
+    "com.google.cycling.pedaling.cumulative": "CumulativeCadenceRecord",
+    "com.google.heart_minutes":             "HeartMinutesRecord",
+    "com.google.active_minutes":            "ActiveMinutesRecord",
     "com.google.power.sample":              "PowerRecord",
-    "com.google.step_count.cadence":        "StepCadenceRecord",         # ← придумали
+    "com.google.step_count.cadence":        "StepCadenceRecord",
     "com.google.step_count.delta":          "StepsRecord",
     "com.google.sleep.segment":             "SleepSessionData",
 }
-
-
-settings = Settings()
 
 # === Настраиваем сессию с retry и актуальным CA ===
 session = requests.Session()
@@ -71,22 +81,125 @@ adapter = HTTPAdapter(max_retries=retry_strategy)
 session.mount("https://", adapter)
 session.verify = certifi.where()
 
-# === Список всех типов данных в порядке SCOPES ===
+# === Собираем все data_types из настроек в один список ===
 all_data_types = []
 for scope in settings.SCOPES or []:
     types = settings.DATA_TYPES_BY_SCOPE.get(scope, [])
     all_data_types.extend([dt for dt in types if dt.startswith("com.google")])
 
 total_types = len(all_data_types)
-# вес одной «части» прогресса
+# Вес одной «части» прогресса
 weight = 100.0 / total_types if total_types > 0 else 0.0
+
+
+def convert_milliseconds_to_utc(timestamp_ms: int) -> str:
+    """
+    Конвертирует миллисекунды в строку вида "DD Month YYYY HH:MM:SS.mmm UTC"
+    """
+    timestamp_sec = timestamp_ms / 1000.0
+    dt = datetime.datetime.utcfromtimestamp(timestamp_sec)
+    ms = int(timestamp_ms % 1000)
+    return dt.strftime("%d %B %Y %H:%M:%S") + f".{ms:03d} UTC"
+
+
+def convert_nanoseconds_to_utc(timestamp_ns: int) -> str:
+    """
+    Конвертирует наносекунды в строку вида "DD Month YYYY HH:MM:SS.micro UTC"
+    """
+    timestamp_sec = timestamp_ns / 1_000_000_000.0
+    dt = datetime.datetime.utcfromtimestamp(timestamp_sec)
+    nanosec = int(timestamp_ns % 1_000_000_000)
+    micros = f"{nanosec:09d}"[:6]
+    return dt.strftime("%d %B %Y %H:%M:%S") + f".{micros} UTC"
+
+
+def load_user(user_json: str) -> dict:
+    """
+    Загружает JSON-объект пользователя либо из файла, либо из строки.
+    """
+    try:
+        with open(user_json, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, OSError):
+        return json.loads(user_json)
+
+
+def fetch_google_fitness_api_token(data: dict) -> Optional[str]:
+    """
+    Делает GET-запрос на URL получения access_token для Google Fitness API.
+    Возвращает токен или None в случае ошибки / 401.
+    """
+    try:
+        resp = session.get(
+            data["google_fitness_api_token_url"],
+            headers={"Accept": "application/json"},
+            timeout=10
+        )
+        if resp.status_code == 401:
+            logger.warning(f"⚠️ Пропускаем {data['email']}: 401 Unauthorized при получении google_fitness_api_token")
+            return None
+        resp.raise_for_status()
+        return resp.json().get("access_token")
+    except requests.RequestException as e:
+        logger.error(f"Ошибка при получении Google Fitness API токена для {data['email']}: {e}")
+        return None
+
+
+def fetch_access_token(data: dict) -> Optional[str]:
+    """
+    Делает GET-запрос на URL получения общего access_token (для Вашего backend).
+    Возвращает токен или None.
+    """
+    try:
+        resp = session.get(
+            data["access_token_url"],
+            headers={"Accept": "application/json"},
+            timeout=10
+        )
+        if resp.status_code == 401:
+            logger.warning(f"⚠️ Пропускаем {data['email']}: 401 Unauthorized при получении access_token")
+            return None
+        resp.raise_for_status()
+        return resp.json().get("access_token")
+    except requests.RequestException as e:
+        logger.error(f"Ошибка при получении access_token для {data['email']}: {e}")
+        return None
+
+
+def fetch_fitness_data(
+    token: str,
+    data_type: str,
+    start_ms: int,
+    end_ms: int
+) -> dict:
+    """
+    Делает POST-запрос в Google Fitness API, чтобы взять данные за период [start_ms, end_ms]
+    """
+    body = {
+        "aggregateBy": [{"dataTypeName": data_type}],
+        "startTimeMillis": start_ms,
+        "endTimeMillis": end_ms,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}"
+    }
+    resp = session.post(
+        settings.GOOGLE_FITNESS_ENDPOINT,
+        json=body,
+        headers=headers,
+        timeout=15
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 def process_bucket_data(bucket: dict, data_type: str) -> list[dict]:
     """
-    Разбор одного bucket: возвращает список распарсенных значений с метками времени.
+    Разбирает один bucket: возвращает список словарей с полями 'timestamp' и 'value'.
+    Если встретится неизвестный тип, сохраняет сырые данные в файл <data_type>.json.
     """
-    results = []
+    results: list[dict] = []
     for dataset in bucket.get("dataset", []):
         for point in dataset.get("point", []):
             ts_ns = point.get("startTimeNanos")
@@ -102,89 +215,29 @@ def process_bucket_data(bucket: dict, data_type: str) -> list[dict]:
             else:
                 # Сохраняем весь payload для неизвестных типов
                 fname = f"{data_type.replace('.', '_')}.json"
-                with open(fname, "w", encoding="utf-8") as f:
-                    json.dump(bucket, f, ensure_ascii=False, indent=2)
-                print(f"Сырые данные сохранены в {fname}")
+                try:
+                    with open(fname, "w", encoding="utf-8") as f:
+                        json.dump(bucket, f, ensure_ascii=False, indent=2)
+                    logger.warning(f"Сырые данные для неизвестного типа '{data_type}' сохранены в {fname}")
+                except Exception as e:
+                    logger.error(f"Не удалось сохранить сырые данные в {fname}: {e}")
                 return []
             if v is not None:
                 results.append({"timestamp": time_str, "value": v})
     return results
 
 
-# UTC-конвертеры (без изменений)
-def convert_milliseconds_to_utc(timestamp_ms):
-    timestamp_sec = timestamp_ms / 1000.0
-    dt = datetime.datetime.utcfromtimestamp(timestamp_sec)
-    ms = int(timestamp_ms % 1000)
-    return dt.strftime("%d %B %Y %H:%M:%S") + f".{ms:03d} UTC"
-
-
-def convert_nanoseconds_to_utc(timestamp_ns):
-    timestamp_sec = timestamp_ns / 1_000_000_000.0
-    dt = datetime.datetime.utcfromtimestamp(timestamp_sec)
-    nanosec = int(timestamp_ns % 1_000_000_000)
-    micros = f"{nanosec:09d}"[:6]
-    return dt.strftime("%d %B %Y %H:%M:%S") + f".{micros} UTC"
-
-
-def load_user(user_json: str) -> dict:
-    try:
-        with open(user_json, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, OSError):
-        return json.loads(user_json)
-
-
-def fetch_google_fitness_api_token(data: dict) -> str:
-    try:
-        resp = requests.get(
-            data["google_fitness_api_token_url"], headers={"Accept": "application/json"}
-        )
-        if resp.status_code == 401:
-            print(f"⚠️ Пропускаем {data['email']}: 401 Unauthorized", file=sys.stderr)
-            return None
-        resp.raise_for_status()
-        return resp.json().get("access_token")
-    except requests.RequestException as e:
-        print(f"Ошибка при получении токена для {data['email']}: {e}", file=sys.stderr)
-        return None
-
-
-def fetch_access_token(data: dict) -> str:
-    try:
-        resp = requests.get(
-            data["access_token_url"], headers={"Accept": "application/json"}
-        )
-        if resp.status_code == 401:
-            print(f"⚠️ Пропускаем {data['email']}: 401 Unauthorized", file=sys.stderr)
-            return None
-        resp.raise_for_status()
-        return resp.json().get("access_token")
-    except requests.RequestException as e:
-        print(f"Ошибка при получении токена для {data['email']}: {e}", file=sys.stderr)
-        return None
-
-
-def fetch_fitness_data(token: str, data_type: str, start_ms: int, end_ms: int) -> dict:
-    body = {
-        "aggregateBy": [{"dataTypeName": data_type}],
-        "startTimeMillis": start_ms,
-        "endTimeMillis": end_ms,
-    }
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
-    resp = session.post(
-        settings.GOOGLE_FITNESS_ENDPOINT, json=body, headers=headers, timeout=10
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
 async def fetch_full_period(
-    google_fitness_api_token: str, access_token: str, data_type: str, start_ms: int, end_ms: int, email: str
-):
+    google_fitness_api_token: str,
+    access_token: str,
+    data_type: str,
+    start_ms: int,
+    end_ms: int,
+    email: str
+) -> int:
     """
-    Для одного data_type бежим по чанкам, считаем прогресс,
-    парсим данные и отправляем их на внешний сервис.
+    Для одного data_type бежит по чанкам, считает прогресс, парсит данные и отправляет их на внешний сервис.
+    Возвращает количество успешно отправленных записей для этого data_type (sum of processed lengths).
     """
     try:
         idx = all_data_types.index(data_type)
@@ -194,67 +247,82 @@ async def fetch_full_period(
     total_duration = end_ms - start_ms
     current_start = start_ms
 
+    sent_records_count = 0
+
     while current_start < end_ms:
         current_end = min(current_start + settings.CHUNK_DURATION_MS, end_ms)
 
-        # запрос в Google Fitness API
+        # 1) Запрос в Google Fitness API
         try:
             payload = fetch_fitness_data(google_fitness_api_token, data_type, current_start, current_end)
         except Exception as e:
-            print(f"❌ Ошибка ({data_type}) [{current_start}-{current_end}]: {e}", file=sys.stderr)
-            return
+            logger.error(f"❌ Ошибка ({data_type}) [{current_start}-{current_end}]: {e}")
+            # Прерываем цикл по этому data_type и возвращаем то, что уже отправили
+            return sent_records_count
 
-        # обновляем прогресс
+        # 2) Вычисляем прогресс
         buckets = payload.get("bucket", [])
         last_ts = max((int(b.get("startTimeMillis", 0)) for b in buckets), default=None)
-        if last_ts:
+        if last_ts is not None and total_duration > 0:
             local_pct = (last_ts - start_ms) / total_duration * 100
             overall = min(int(offset + (local_pct * weight / 100.0)), 100)
             bar = json.dumps({"type": "google_fitness_api", "progress": overall})
-            await redis_client.set(
-                f"{settings.REDIS_DATA_COLLECTION_GOOGLE_FITNESS_API_PROGRESS_BAR_NAMESPACE}{email}",
-                bar
-            )
-            print(f"[{data_type}] local {int(local_pct)}% → overall {overall}%")
+            try:
+                await redis_client.set(
+                    f"{settings.REDIS_DATA_COLLECTION_GOOGLE_FITNESS_API_PROGRESS_BAR_NAMESPACE}{email}",
+                    bar
+                )
+                logger.info(f"[{data_type}] Прогресс: local {int(local_pct)}% → overall {overall}%")
+            except Exception as e:
+                logger.error(f"Не удалось обновить прогресс в Redis для {email}: {e}")
 
-        # парсим каждый bucket и отправляем
+        # 3) Парсим каждый bucket и отправляем
         for bucket in buckets:
             processed = process_bucket_data(bucket, data_type)
             if not processed:
                 continue
 
-            # POST на внешний сервис
-            if not GOOGLE_TO_DATA_TYPE.get(data_type):
-                continue
-            
+            # Пропускаем, если нет сопоставления в GOOGLE_TO_DATA_TYPE
             url_data_type = GOOGLE_TO_DATA_TYPE.get(data_type)
-            url = f"{settings.DATA_COLLECTION_API_BASE_URL}/data-collection-api/api/v1/post_data/raw_data_google_fitness_api/{url_data_type}"
+            if not url_data_type:
+                continue
+
+            url = (
+                f"{settings.DATA_COLLECTION_API_BASE_URL}"
+                f"/data-collection-api/api/v1/post_data/raw_data_google_fitness_api/{url_data_type}"
+            )
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {access_token}"
             }
 
             try:
-                resp = requests.post(
+                resp = session.post(
                     url,
                     json=processed,
                     headers=headers,
-                    timeout=5
+                    timeout=10
                 )
                 resp.raise_for_status()
-                print(f"→ Отправлено {len(processed)} записей {data_type} на {url}")
+                sent_records_count += len(processed)
+                logger.info(f"→ Отправлено {len(processed)} записей '{data_type}' на {url}")
             except Exception as e:
-                print(f"❌ Ошибка отправки {data_type} на {url}: {e}", file=sys.stderr)
+                logger.error(f"❌ Ошибка отправки {data_type} на {url}: {e}")
 
         current_start = current_end
 
-    # финальный прогресс
+    # 4) Финальный прогресс для этого data_type
     final_overall = min(int(offset + weight), 100)
-    await redis_client.set(
-        f"{settings.REDIS_DATA_COLLECTION_GOOGLE_FITNESS_API_PROGRESS_BAR_NAMESPACE}{email}",
-        json.dumps({"type": "google_fitness_api", "progress": final_overall})
-    )
-    print(f"[{data_type}] done → overall {final_overall}%")
+    try:
+        await redis_client.set(
+            f"{settings.REDIS_DATA_COLLECTION_GOOGLE_FITNESS_API_PROGRESS_BAR_NAMESPACE}{email}",
+            json.dumps({"type": "google_fitness_api", "progress": final_overall})
+        )
+        logger.info(f"[{data_type}] Завершён: overall {final_overall}%")
+    except Exception as e:
+        logger.error(f"Не удалось записать финальный прогресс в Redis для {email}: {e}")
+
+    return sent_records_count
 
 
 async def main():
@@ -266,23 +334,95 @@ async def main():
         required=True,
         help="Путь к JSON-файлу или JSON-строка с данными пользователя",
     )
-    await redis_client.connect()
     args = parser.parse_args()
+
+    # 1) Загружаем данные пользователя
     user = load_user(args.user_json)
     user_email = user.get("email")
+    if not user_email:
+        logger.error("Не указан email пользователя в JSON")
+        sys.exit(1)
+
+    # 2) Получаем токены
     google_fitness_api_token = fetch_google_fitness_api_token(user)
-    access_token = fetch_access_token(user)
     if not google_fitness_api_token:
+        logger.error("Не удалось получить Google Fitness API токен, выходим")
         sys.exit(1)
 
+    access_token = fetch_access_token(user)
     if not access_token:
+        logger.error("Не удалось получить общий access token, выходим")
         sys.exit(1)
 
-    for scope in settings.SCOPES or []:
-        for dt in settings.DATA_TYPES_BY_SCOPE.get(scope, []):
-            await fetch_full_period(
-                google_fitness_api_token, access_token, dt, settings.START_MS, settings.END_MS, user_email
-            )
+    # 3) Подключаем Redis
+    try:
+        await redis_client.connect()
+    except Exception as e:
+        logger.error(f"Не удалось подключиться к Redis: {e}")
+        sys.exit(1)
+
+    # 4) Уведомление о старте
+    start_time = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    subject_start = "[GoogleFitness] Начало выгрузки данных"
+    body_start = f"""
+    <html>
+      <body>
+        <h2>🚀 Выгрузка Google Fitness API — Старт</h2>
+        <p><strong>Пользователь:</strong> {user_email}</p>
+        <p><strong>Время запуска:</strong> {start_time}</p>
+        <p>Начинается сбор всех типов данных ({total_types} типов).</p>
+      </body>
+    </html>
+    """
+    try:
+        await notifications_api.send_email(user_email, subject_start, body_start)
+        logger.info("Отправлено email-уведомление о старте выгрузки")
+    except Exception as e:
+        logger.error(f"Не удалось отправить email-уведомление о старте: {e}")
+
+    # 5) Обрабатываем все data_types по порядку
+    total_sent = 0
+    for idx, dt in enumerate(all_data_types, start=1):
+        logger.info(f"Обработка типа данных [{idx}/{total_types}]: {dt}")
+        sent_for_type = await fetch_full_period(
+            google_fitness_api_token,
+            access_token,
+            dt,
+            settings.START_MS,
+            settings.END_MS,
+            user_email
+        )
+        total_sent += sent_for_type
+        logger.info(f"Закончили {dt}. Отправлено записей: {sent_for_type}")
+
+    # 6) Уведомление о завершении
+    finish_time = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    subject_end = "[GoogleFitness] Завершение выгрузки данных"
+    body_end = f"""
+    <html>
+      <body>
+        <h2>✅ Выгрузка Google Fitness API — Завершена</h2>
+        <p><strong>Пользователь:</strong> {user_email}</p>
+        <p><strong>Время старта:</strong> {start_time}</p>
+        <p><strong>Время окончания:</strong> {finish_time}</p>
+        <p><strong>Всего типов обработано:</strong> {total_types}</p>
+        <p><strong>Всего записей отправлено:</strong> {total_sent}</p>
+      </body>
+    </html>
+    """
+    try:
+        await notifications_api.send_email(user_email, subject_end, body_end)
+        logger.info("Отправлено email-уведомление о завершении выгрузки")
+    except Exception as e:
+        logger.error(f"Не удалось отправить email-уведомление о завершении: {e}")
+
+    # 7) Отключаем Redis и выходим
+    try:
+        await redis_client.disconnect()
+    except Exception as e:
+        logger.warning(f"Ошибка при отключении от Redis: {e}")
+
+    logger.info("Скрипт успешно завершил работу")
 
 
 if __name__ == "__main__":
