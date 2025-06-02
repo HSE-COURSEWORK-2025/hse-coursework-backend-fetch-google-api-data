@@ -91,7 +91,7 @@ class Settings(BaseSettings):
     REDIS_HOST: str | None = "redis"
     REDIS_PORT: str | None = "6379"
     REDIS_DATA_COLLECTION_GOOGLE_FITNESS_API_PROGRESS_BAR_NAMESPACE: str | None = "REDIS_DATA_COLLECTION_GOOGLE_FITNESS_API_PROGRESS_BAR_NAMESPACE-"
-
+    
     START_MS: int | None = int((time.time() - 360 * 24 * 60 * 60) * 1000)
     # START_MS: int | None = 0
     END_MS: int | None = int(time.time() * 1000)

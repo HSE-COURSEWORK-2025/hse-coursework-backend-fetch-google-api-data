@@ -342,17 +342,19 @@ async def main():
     if not user_email:
         logger.error("Не указан email пользователя в JSON")
         sys.exit(1)
+    
+    logger.info(f"Выполняется для пользователя: {user_email}")
 
     # 2) Получаем токены
     google_fitness_api_token = fetch_google_fitness_api_token(user)
     if not google_fitness_api_token:
         logger.error("Не удалось получить Google Fitness API токен, выходим")
-        sys.exit(1)
+        sys.exit(0)
 
     access_token = fetch_access_token(user)
     if not access_token:
         logger.error("Не удалось получить общий access token, выходим")
-        sys.exit(1)
+        sys.exit(0)
 
     # 3) Подключаем Redis
     try:
