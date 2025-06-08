@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 GOOGLE_TO_DATA_TYPE: Dict[str, str] = {
-    # float-типы
+    # # float-типы
     "com.google.oxygen_saturation":         "BloodOxygenData",
     "com.google.heart_rate.bpm":            "HeartRateRecord",
     "com.google.height":                    "HeightRecord",
@@ -166,7 +166,15 @@ class SleepTimeDataProcessor(DataProcessorInterface):
         time_str = convert_milliseconds_to_utc(int(start_time_ms))
 
         # Считаем длительность сна в миллисекундах
-        sleep_time_ms = int(end_time_ms) - int(start_time_ms)
+        sleep_time_ms = None
+        if parsed_bucket.dataset:
+            if parsed_bucket.dataset[0].point:
+                first_stage_start_time_nanos = parsed_bucket.dataset[0].point[0].startTimeNanos
+                last_stage_end_time_nanos = parsed_bucket.dataset[0].point[0].endTimeNanos
+                sleep_time_ms = (int(last_stage_end_time_nanos) - int(first_stage_start_time_nanos)) / 1_000_000
+
+        else:
+            sleep_time_ms = int(end_time_ms) - int(start_time_ms)
         
         results.append({
             "timestamp": time_str,
