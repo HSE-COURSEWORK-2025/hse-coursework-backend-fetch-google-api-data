@@ -176,10 +176,11 @@ class SleepTimeDataProcessor(DataProcessorInterface):
         else:
             sleep_time_ms = int(end_time_ms) - int(start_time_ms)
         
-        results.append({
-            "timestamp": time_str,
-            "value": sleep_time_ms
-        })
+        if sleep_time_ms is not None:
+            results.append({
+                "timestamp": time_str,
+                "value": sleep_time_ms
+            })
 
         return self.data_type, results
 
