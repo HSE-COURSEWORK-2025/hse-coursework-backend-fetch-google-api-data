@@ -15,8 +15,8 @@ class Settings(BaseSettings):
 
     SCOPES: List[str] | None = [
         "https://www.googleapis.com/auth/fitness.activity.read",
-        "https://www.googleapis.com/auth/fitness.blood_glucose.read",
         "https://www.googleapis.com/auth/fitness.blood_pressure.read",
+        "https://www.googleapis.com/auth/fitness.blood_glucose.read",
         "https://www.googleapis.com/auth/fitness.body.read",
         "https://www.googleapis.com/auth/fitness.body_temperature.read",
         "https://www.googleapis.com/auth/fitness.heart_rate.read",

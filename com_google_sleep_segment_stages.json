@@ -1,0 +1,23 @@
+{
+  "startTimeMillis": "1746790889352",
+  "endTimeMillis": "1749382889352",
+  "dataset": [
+    {
+      "dataSourceId": "derived:com.google.sleep.segment:com.google.android.gms:merged",
+      "point": [
+        {
+          "startTimeNanos": "1748182380000000000",
+          "endTimeNanos": "1748186579999000000",
+          "dataTypeName": "com.google.sleep.segment",
+          "originDataSourceId": "raw:com.google.sleep.segment:com.xiaomi.wearable:health_platform",
+          "value": [
+            {
+              "intVal": 0,
+              "mapVal": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
