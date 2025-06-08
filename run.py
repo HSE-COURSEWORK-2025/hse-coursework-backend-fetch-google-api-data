@@ -5,15 +5,17 @@ import json
 import sys
 import datetime
 import certifi
+import requests
 
 from settings import Settings
 from redis import redis_client
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
-from typing import Dict, Optional
+from typing import Dict, Optional, Any, List, Tuple
 
 from notifications import notifications_api
-import requests
+from models import BucketModel
+from abc import ABC
 
 # Настройки
 settings = Settings()
@@ -45,6 +47,8 @@ INT_TYPES = [
     "com.google.step_count.delta",
     "com.google.activity.exercise",
     "com.google.sleep.segment",
+    "com.google.sleep.segment.stages",
+    "com.google.sleep.segment.time"
 ]
 
 GOOGLE_TO_DATA_TYPE: Dict[str, str] = {
@@ -67,6 +71,8 @@ GOOGLE_TO_DATA_TYPE: Dict[str, str] = {
     "com.google.step_count.cadence":        "StepCadenceRecord",
     "com.google.step_count.delta":          "StepsRecord",
     "com.google.sleep.segment":             "SleepSessionData",
+    "com.google.sleep.segment.stages":      "SleepSessionStagesData",
+    "com.google.sleep.segment.time":        "SleepSessionTimeData"
 }
 
 # === Настраиваем сессию с retry и актуальным CA ===
@@ -90,6 +96,107 @@ for scope in settings.SCOPES or []:
 total_types = len(all_data_types)
 # Вес одной «части» прогресса
 weight = 100.0 / total_types if total_types > 0 else 0.0
+
+
+class DataProcessorInterface(ABC):
+    def process(self, bucket: Any) -> Tuple[str, List[dict]]:
+        pass
+
+
+class DefaultDataProcessor(DataProcessorInterface):
+    def __init__(self, data_type: str):
+        self.data_type = data_type
+    
+    def process(self, bucket: Any) -> Tuple[str, List[dict]]:
+        results: list[dict] = []
+        parsed_bucket = BucketModel.model_validate(bucket)
+
+        for dataset in parsed_bucket.dataset:
+            for point in dataset.point:
+                ts_ns = point.startTimeNanos
+                time_str = convert_nanoseconds_to_utc(int(ts_ns)) if ts_ns else ""
+                values = point.value
+                if not values:
+                    continue
+                val = values[0]
+                if self.data_type in FLOAT_TYPES:
+                    v = val.fpVal
+                elif self.data_type in INT_TYPES:
+                    v = val.intVal
+                else:
+                    return self.data_type, []
+                if v is not None:
+                    results.append({"timestamp": time_str, "value": v})
+        return self.data_type, results
+
+
+class SleepStagesDataProcessor(DataProcessorInterface):
+    data_type = "com.google.sleep.segment.stages"
+
+    def process(self, bucket: Any) -> Tuple[str, List[dict]]:
+        results: list[dict] = []
+        parsed_bucket = BucketModel.model_validate(bucket)
+        time_str = convert_milliseconds_to_utc(int(parsed_bucket.startTimeMillis))
+
+        for dataset in parsed_bucket.dataset:
+            result_arr = []
+            for point in dataset.point:
+                start_time_ns = point.startTimeNanos
+                end_time_ns = point.endTimeNanos
+                start_time_str = convert_nanoseconds_to_utc(int(start_time_ns)) if start_time_ns else ""
+                end_time_str = convert_nanoseconds_to_utc(int(end_time_ns)) if end_time_ns else ""
+                values = point.value
+                if not values:
+                    continue
+                val = values[0]
+                if self.data_type in FLOAT_TYPES:
+                    stage_val = val.fpVal
+                elif self.data_type in INT_TYPES:
+                    stage_val = val.intVal
+                if stage_val is not None:
+                    result_arr.append({"endTime":end_time_str,"stage":stage_val,"startTime":start_time_str})
+            if result_arr:
+                results.append({
+                    "timestamp": time_str,
+                    "value": json.dumps(result_arr)
+                })
+        return self.data_type, results
+
+
+class SleepTimeDataProcessor(DataProcessorInterface):
+    data_type = "com.google.sleep.segment.time"
+    
+    def process(self, bucket: Any) -> Tuple[str, List[dict]]:
+        results: list[dict] = []
+        parsed_bucket = BucketModel.model_validate(bucket)
+
+        # Берём время начала и конца сессии в миллисекундах
+        start_time_ms = parsed_bucket.startTimeMillis
+        end_time_ms   = parsed_bucket.endTimeMillis
+        if start_time_ms is None or end_time_ms is None:
+            return self.data_type, results
+
+        # Конвертируем start_time_ms в строку вида "DD Month YYYY HH:MM:SS.mmm UTC"
+        time_str = convert_milliseconds_to_utc(int(start_time_ms))
+
+        # Считаем длительность сна в миллисекундах
+        sleep_time_ms = int(end_time_ms) - int(start_time_ms)
+        
+        results.append({
+            "timestamp": time_str,
+            "value": sleep_time_ms
+        })
+
+        return self.data_type, results
+
+
+ALL_GOOGLE_TYPES = FLOAT_TYPES + INT_TYPES
+data_processors_by_datatype = {
+    dt: [DefaultDataProcessor(dt)]
+    for dt in ALL_GOOGLE_TYPES
+}
+
+data_processors_by_datatype["com.google.sleep.segment"] = [SleepStagesDataProcessor(), SleepTimeDataProcessor()]
 
 
 def convert_milliseconds_to_utc(timestamp_ms: int) -> str:
@@ -200,6 +307,7 @@ def process_bucket_data(bucket: dict, data_type: str) -> list[dict]:
     Если встретится неизвестный тип, сохраняет сырые данные в файл <data_type>.json.
     """
     results: list[dict] = []
+    
     for dataset in bucket.get("dataset", []):
         for point in dataset.get("point", []):
             ts_ns = point.get("startTimeNanos")
@@ -278,36 +386,41 @@ async def fetch_full_period(
 
         # 3) Парсим каждый bucket и отправляем
         for bucket in buckets:
-            processed = process_bucket_data(bucket, data_type)
-            if not processed:
-                continue
+            data_processors = data_processors_by_datatype[data_type]
+            for data_processor in data_processors:
+                curr_data_type, processed = data_processor.process(bucket)
+                
+                if not processed:
+                    continue
 
-            # Пропускаем, если нет сопоставления в GOOGLE_TO_DATA_TYPE
-            url_data_type = GOOGLE_TO_DATA_TYPE.get(data_type)
-            if not url_data_type:
-                continue
+                # Пропускаем, если нет сопоставления в GOOGLE_TO_DATA_TYPE
+                url_data_type = GOOGLE_TO_DATA_TYPE.get(curr_data_type)
+                
+                
+                if not url_data_type:
+                    continue
 
-            url = (
-                f"{settings.DATA_COLLECTION_API_BASE_URL}"
-                f"/data-collection-api/api/v1/post_data/raw_data_google_fitness_api/{url_data_type}"
-            )
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {access_token}"
-            }
-
-            try:
-                resp = session.post(
-                    url,
-                    json=processed,
-                    headers=headers,
-                    timeout=10
+                url = (
+                    f"{settings.DATA_COLLECTION_API_BASE_URL}"
+                    f"/data-collection-api/api/v1/post_data/raw_data_google_fitness_api/{url_data_type}"
                 )
-                resp.raise_for_status()
-                sent_records_count += len(processed)
-                logger.info(f"→ Отправлено {len(processed)} записей '{data_type}' на {url}")
-            except Exception as e:
-                logger.error(f"❌ Ошибка отправки {data_type} на {url}: {e}")
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {access_token}"
+                }
+
+                try:
+                    resp = session.post(
+                        url,
+                        json=processed,
+                        headers=headers,
+                        timeout=10
+                    )
+                    resp.raise_for_status()
+                    sent_records_count += len(processed)
+                    logger.info(f"→ Отправлено {len(processed)} записей '{data_type}' на {url}")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка отправки {data_type} на {url}: {e}")
 
         current_start = current_end
 
