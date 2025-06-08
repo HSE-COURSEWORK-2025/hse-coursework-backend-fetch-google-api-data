@@ -28,28 +28,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-FLOAT_TYPES = [
-    "com.google.oxygen_saturation",
-    "com.google.heart_rate.bpm",
-    "com.google.height",
-    "com.google.weight",
-]
-INT_TYPES = [
-    "com.google.activity.segment",
-    "com.google.calories.bmr",
-    "com.google.calories.expended",
-    "com.google.cycling.pedaling.cadence",
-    "com.google.cycling.pedaling.cumulative",
-    "com.google.heart_minutes",
-    "com.google.active_minutes",
-    "com.google.power.sample",
-    "com.google.step_count.cadence",
-    "com.google.step_count.delta",
-    "com.google.activity.exercise",
-    "com.google.sleep.segment",
-    "com.google.sleep.segment.stages",
-    "com.google.sleep.segment.time"
-]
 
 GOOGLE_TO_DATA_TYPE: Dict[str, str] = {
     # float-типы
@@ -72,7 +50,13 @@ GOOGLE_TO_DATA_TYPE: Dict[str, str] = {
     "com.google.step_count.delta":          "StepsRecord",
     "com.google.sleep.segment":             "SleepSessionData",
     "com.google.sleep.segment.stages":      "SleepSessionStagesData",
-    "com.google.sleep.segment.time":        "SleepSessionTimeData"
+    "com.google.sleep.segment.time":        "SleepSessionTimeData",
+    "com.google.blood_pressure":            "BloodPressureData",
+    "com.google.blood_glucose":             "BloodGlucoseData",
+    "com.google.body.fat.percentage":       "BodyFatPercentageData",
+    "com.google.body.temperature":          "BodyTemperatureData",
+    "com.google.hydration":                 "HydrationData",
+    "com.google.nutrition":                 "NutritionData"
 }
 
 # === Настраиваем сессию с retry и актуальным CA ===
@@ -119,9 +103,9 @@ class DefaultDataProcessor(DataProcessorInterface):
                 if not values:
                     continue
                 val = values[0]
-                if self.data_type in FLOAT_TYPES:
+                if val.fpVal:
                     v = val.fpVal
-                elif self.data_type in INT_TYPES:
+                elif val.intVal:
                     v = val.intVal
                 else:
                     return self.data_type, []
@@ -149,9 +133,11 @@ class SleepStagesDataProcessor(DataProcessorInterface):
                 if not values:
                     continue
                 val = values[0]
-                if self.data_type in FLOAT_TYPES:
+
+                stage_val = None
+                if val.fpVal:
                     stage_val = val.fpVal
-                elif self.data_type in INT_TYPES:
+                elif val.intVal:
                     stage_val = val.intVal
                 if stage_val is not None:
                     result_arr.append({"endTime":end_time_str,"stage":stage_val,"startTime":start_time_str})
@@ -190,10 +176,9 @@ class SleepTimeDataProcessor(DataProcessorInterface):
         return self.data_type, results
 
 
-ALL_GOOGLE_TYPES = FLOAT_TYPES + INT_TYPES
 data_processors_by_datatype = {
     dt: [DefaultDataProcessor(dt)]
-    for dt in ALL_GOOGLE_TYPES
+    for dt in GOOGLE_TO_DATA_TYPE
 }
 
 data_processors_by_datatype["com.google.sleep.segment"] = [SleepStagesDataProcessor(), SleepTimeDataProcessor()]
@@ -301,40 +286,6 @@ def fetch_fitness_data(
     return resp.json()
 
 
-def process_bucket_data(bucket: dict, data_type: str) -> list[dict]:
-    """
-    Разбирает один bucket: возвращает список словарей с полями 'timestamp' и 'value'.
-    Если встретится неизвестный тип, сохраняет сырые данные в файл <data_type>.json.
-    """
-    results: list[dict] = []
-    
-    for dataset in bucket.get("dataset", []):
-        for point in dataset.get("point", []):
-            ts_ns = point.get("startTimeNanos")
-            time_str = convert_nanoseconds_to_utc(int(ts_ns)) if ts_ns else ""
-            values = point.get("value", [])
-            if not values:
-                continue
-            val = values[0]
-            if data_type in FLOAT_TYPES:
-                v = val.get("fpVal")
-            elif data_type in INT_TYPES:
-                v = val.get("intVal")
-            else:
-                # Сохраняем весь payload для неизвестных типов
-                fname = f"{data_type.replace('.', '_')}.json"
-                try:
-                    with open(fname, "w", encoding="utf-8") as f:
-                        json.dump(bucket, f, ensure_ascii=False, indent=2)
-                    logger.warning(f"Сырые данные для неизвестного типа '{data_type}' сохранены в {fname}")
-                except Exception as e:
-                    logger.error(f"Не удалось сохранить сырые данные в {fname}: {e}")
-                return []
-            if v is not None:
-                results.append({"timestamp": time_str, "value": v})
-    return results
-
-
 async def fetch_full_period(
     google_fitness_api_token: str,
     access_token: str,
@@ -386,7 +337,9 @@ async def fetch_full_period(
 
         # 3) Парсим каждый bucket и отправляем
         for bucket in buckets:
-            data_processors = data_processors_by_datatype[data_type]
+            data_processors = data_processors_by_datatype.get(data_type)
+            if not data_processors:
+                continue
             for data_processor in data_processors:
                 curr_data_type, processed = data_processor.process(bucket)
                 
