@@ -2,8 +2,99 @@
 
 import time
 from pydantic import model_validator
+from abc import ABC, abstractmethod
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List, Dict
+from urllib.parse import urlencode
+import datetime
+import certifi
+import requests
+from urllib.parse import urlencode
+
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
+from typing import Dict, Optional, Any, List, Tuple
+
+from models import BucketModel
+from abc import ABC, abstractmethod
+
+
+
+class URLGeneratorInterface(ABC):
+    @abstractmethod
+    def request(
+        self,
+        session: requests.Session,
+        headers: Dict[str, str],
+        body: Optional[Dict[str, Any]],
+        url_params: Dict[str, Any]
+    ) -> dict:
+        """
+        Выполняет HTTP-запрос для данного генератора.
+        Если body не None, используется POST, иначе GET.
+        Возвращает распарсенный JSON-ответ.
+        """
+        ...
+
+
+class DefaultURLGenerator(URLGeneratorInterface):
+    url = "https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate"
+
+    def request(
+        self,
+        session: requests.Session,
+        headers: Dict[str, str],
+        body: Optional[Dict[str, Any]],
+        url_params: Dict[str, Any]
+    ) -> dict:
+        resp = session.post(
+            self.url,
+            json=body,
+            headers=headers,
+            timeout=15
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        return payload.get('bucket', [])
+
+
+class SleepTimeDataURLGenerator(URLGeneratorInterface):
+    base_url = "https://www.googleapis.com/fitness/v1/users/me/sessions"
+
+    def request(
+        self,
+        session: requests.Session,
+        headers: Dict[str, str],
+        body: Optional[Dict[str, Any]],
+        url_params: Dict[str, Any]
+    ) -> dict:
+        # Проверяем обязательные параметры
+        start_time = url_params.get('start_time')
+        end_time = url_params.get('end_time')
+        activity_type = url_params.get('activity_type', 72)
+        if not start_time:
+            raise ValueError("Missing required parameter: start_time")
+        if not end_time:
+            raise ValueError("Missing required parameter: end_time")
+
+        # Формируем URL для GET
+        params = {
+            'startTime': start_time,
+            'endTime': end_time,
+            'activityType': activity_type,
+        }
+        query_string = urlencode(params)
+        url = f"{self.base_url}?{query_string}"
+
+        resp = session.get(
+            url,
+            headers=headers,
+            timeout=15
+        )
+        resp.raise_for_status()
+
+        payload = resp.json()
+        return payload.get('session', [])
 
 
 class Settings(BaseSettings):
@@ -14,15 +105,15 @@ class Settings(BaseSettings):
     )
 
     SCOPES: List[str] | None = [
-        "https://www.googleapis.com/auth/fitness.activity.read",
-        "https://www.googleapis.com/auth/fitness.blood_pressure.read",
-        "https://www.googleapis.com/auth/fitness.blood_glucose.read",
-        "https://www.googleapis.com/auth/fitness.body.read",
-        "https://www.googleapis.com/auth/fitness.body_temperature.read",
-        "https://www.googleapis.com/auth/fitness.heart_rate.read",
-        "https://www.googleapis.com/auth/fitness.nutrition.read",
-        "https://www.googleapis.com/auth/fitness.oxygen_saturation.read",
-        "https://www.googleapis.com/auth/fitness.reproductive_health.read",
+        # "https://www.googleapis.com/auth/fitness.activity.read",
+        # "https://www.googleapis.com/auth/fitness.blood_pressure.read",
+        # "https://www.googleapis.com/auth/fitness.blood_glucose.read",
+        # "https://www.googleapis.com/auth/fitness.body.read",
+        # "https://www.googleapis.com/auth/fitness.body_temperature.read",
+        # "https://www.googleapis.com/auth/fitness.heart_rate.read",
+        # "https://www.googleapis.com/auth/fitness.nutrition.read",
+        # "https://www.googleapis.com/auth/fitness.oxygen_saturation.read",
+        # "https://www.googleapis.com/auth/fitness.reproductive_health.read",
         "https://www.googleapis.com/auth/fitness.sleep.read",
     ]
 
@@ -86,6 +177,8 @@ class Settings(BaseSettings):
         ],
     }
 
+    API_URL_BY_DATA_TYPES: Dict[str, URLGeneratorInterface] | None = { "com.google.sleep.segment": SleepTimeDataURLGenerator() }
+
     CHUNK_DURATION_MS: int | None = 30 * 24 * 60 * 60 * 1000
 
     REDIS_HOST: str | None = "redis"
@@ -112,3 +205,4 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+default_url_generator = DefaultURLGenerator()

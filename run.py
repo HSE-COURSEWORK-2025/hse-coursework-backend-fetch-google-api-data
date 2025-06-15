@@ -8,7 +8,7 @@ import datetime
 import certifi
 import requests
 
-from settings import Settings
+from settings import Settings, default_url_generator
 from redis import redis_client
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
@@ -18,6 +18,7 @@ from notifications import notifications_api
 from models import BucketModel
 from abc import ABC
 
+
 # Настройки
 settings = Settings()
 
@@ -25,39 +26,38 @@ settings = Settings()
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
 
 GOOGLE_TO_DATA_TYPE: Dict[str, str] = {
     # # float-типы
-    "com.google.oxygen_saturation":         "BloodOxygenData",
-    "com.google.heart_rate.bpm":            "HeartRateRecord",
-    "com.google.height":                    "HeightRecord",
-    "com.google.weight":                    "WeightRecord",
-
+    "com.google.oxygen_saturation": "BloodOxygenData",
+    "com.google.heart_rate.bpm": "HeartRateRecord",
+    "com.google.height": "HeightRecord",
+    "com.google.weight": "WeightRecord",
     # int-типы
-    "com.google.activity.segment":          "ActivitySegmentRecord",
-    "com.google.activity.exercise":         "ExerciseSessionRecord",
-    "com.google.calories.bmr":              "BasalMetabolicRateRecord",
-    "com.google.calories.expended":         "TotalCaloriesBurnedRecord",
-    "com.google.cycling.pedaling.cadence":  "CadenceRecord",
+    "com.google.activity.segment": "ActivitySegmentRecord",
+    "com.google.activity.exercise": "ExerciseSessionRecord",
+    "com.google.calories.bmr": "BasalMetabolicRateRecord",
+    "com.google.calories.expended": "TotalCaloriesBurnedRecord",
+    "com.google.cycling.pedaling.cadence": "CadenceRecord",
     "com.google.cycling.pedaling.cumulative": "CumulativeCadenceRecord",
-    "com.google.heart_minutes":             "HeartMinutesRecord",
-    "com.google.active_minutes":            "ActiveMinutesRecord",
-    "com.google.power.sample":              "PowerRecord",
-    "com.google.step_count.cadence":        "StepCadenceRecord",
-    "com.google.step_count.delta":          "StepsRecord",
-    "com.google.sleep.segment":             "SleepSessionData",
-    "com.google.sleep.segment.stages":      "SleepSessionStagesData",
-    "com.google.sleep.segment.time":        "SleepSessionTimeData",
-    "com.google.blood_pressure":            "BloodPressureData",
-    "com.google.blood_glucose":             "BloodGlucoseData",
-    "com.google.body.fat.percentage":       "BodyFatPercentageData",
-    "com.google.body.temperature":          "BodyTemperatureData",
-    "com.google.hydration":                 "HydrationData",
-    "com.google.nutrition":                 "NutritionData"
+    "com.google.heart_minutes": "HeartMinutesRecord",
+    "com.google.active_minutes": "ActiveMinutesRecord",
+    "com.google.power.sample": "PowerRecord",
+    "com.google.step_count.cadence": "StepCadenceRecord",
+    "com.google.step_count.delta": "StepsRecord",
+    "com.google.sleep.segment": "SleepSessionData",
+    "com.google.sleep.segment.stages": "SleepSessionStagesData",
+    "com.google.sleep.segment.time": "SleepSessionTimeData",
+    "com.google.blood_pressure": "BloodPressureData",
+    "com.google.blood_glucose": "BloodGlucoseData",
+    "com.google.body.fat.percentage": "BodyFatPercentageData",
+    "com.google.body.temperature": "BodyTemperatureData",
+    "com.google.hydration": "HydrationData",
+    "com.google.nutrition": "NutritionData",
 }
 
 # === Настраиваем сессию с retry и актуальным CA ===
@@ -91,7 +91,7 @@ class DataProcessorInterface(ABC):
 class DefaultDataProcessor(DataProcessorInterface):
     def __init__(self, data_type: str):
         self.data_type = data_type
-    
+
     def process(self, bucket: Any) -> Tuple[str, List[dict]]:
         results: list[dict] = []
         parsed_bucket = BucketModel.model_validate(bucket)
@@ -129,8 +129,14 @@ class SleepStagesDataProcessor(DataProcessorInterface):
             for point in dataset.point:
                 start_time_ns = point.startTimeNanos
                 end_time_ns = point.endTimeNanos
-                start_time_str = convert_nanoseconds_to_utc(int(start_time_ns)) if start_time_ns else ""
-                end_time_str = convert_nanoseconds_to_utc(int(end_time_ns)) if end_time_ns else ""
+                start_time_str = (
+                    convert_nanoseconds_to_utc(int(start_time_ns))
+                    if start_time_ns
+                    else ""
+                )
+                end_time_str = (
+                    convert_nanoseconds_to_utc(int(end_time_ns)) if end_time_ns else ""
+                )
                 values = point.value
                 if not values:
                     continue
@@ -142,60 +148,59 @@ class SleepStagesDataProcessor(DataProcessorInterface):
                 elif val.intVal:
                     stage_val = val.intVal
                 if stage_val is not None:
-                    result_arr.append({"endTime":end_time_str,"stage":stage_val,"startTime":start_time_str})
+                    result_arr.append(
+                        {
+                            "endTime": end_time_str,
+                            "stage": stage_val,
+                            "startTime": start_time_str,
+                        }
+                    )
             if result_arr:
-                results.append({
-                    "timestamp": start_time_str,
-                    "value": json.dumps(result_arr)
-                })
+                results.append(
+                    {"timestamp": start_time_str, "value": json.dumps(result_arr)}
+                )
         return self.data_type, results
 
 
 class SleepTimeDataProcessor(DataProcessorInterface):
     data_type = "com.google.sleep.segment.time"
-    
+
     def process(self, bucket: Any) -> Tuple[str, List[dict]]:
         results: list[dict] = []
         parsed_bucket = BucketModel.model_validate(bucket)
 
         # Берём время начала и конца сессии в миллисекундах
         start_time_ms = parsed_bucket.startTimeMillis
-        end_time_ms   = parsed_bucket.endTimeMillis
+        end_time_ms = parsed_bucket.endTimeMillis
 
         if start_time_ms is None or end_time_ms is None:
             return self.data_type, results
 
         # Конвертируем start_time_ms в строку вида "DD Month YYYY HH:MM:SS.mmm UTC"
-        
+
         # Считаем длительность сна в миллисекундах
-        sleep_time_min = None
-        if parsed_bucket.dataset:
-            for sleep_session in parsed_bucket.dataset[0].point:
-                start_time_ns = sleep_session.startTimeNanos
-                end_time_ns = sleep_session.endTimeNanos
+        duration_ms = end_time_ms - start_time_ms
+        duration_min = duration_ms / (1000 * 60)  # из мс → минуты
+        duration_min = int(math.ceil(duration_min))  # округляем вверх до целой минуты
 
-                sleep_time_ms = (int(end_time_ns) - int(start_time_ns)) / 1_000_000
-                sleep_time_min = sleep_time_ms / 60000.0
-                sleep_time_min = int(math.ceil(sleep_time_min))
-
-                sleep_start_time = convert_nanoseconds_to_utc(start_time_ns)
-                sleep_end_time = convert_nanoseconds_to_utc(end_time_ns)
-
-                if sleep_time_min is not None:
-                    results.append({
-                        "timestamp": sleep_start_time,
-                        "value": sleep_time_min
-                    })
+        results.append(
+            {
+                "timestamp": convert_milliseconds_to_utc(start_time_ms),
+                "value": duration_min,
+            }
+        )
 
         return self.data_type, results
 
 
 data_processors_by_datatype = {
-    dt: [DefaultDataProcessor(dt)]
-    for dt in GOOGLE_TO_DATA_TYPE
+    dt: [DefaultDataProcessor(dt)] for dt in GOOGLE_TO_DATA_TYPE
 }
 
-data_processors_by_datatype["com.google.sleep.segment"] = [SleepStagesDataProcessor(), SleepTimeDataProcessor()]
+data_processors_by_datatype["com.google.sleep.segment"] = [
+    SleepStagesDataProcessor(),
+    SleepTimeDataProcessor(),
+]
 
 
 def convert_milliseconds_to_utc(timestamp_ms: int) -> str:
@@ -239,15 +244,19 @@ def fetch_google_fitness_api_token(data: dict) -> Optional[str]:
         resp = session.get(
             data["google_fitness_api_token_url"],
             headers={"Accept": "application/json"},
-            timeout=10
+            timeout=10,
         )
         if resp.status_code == 401:
-            logger.warning(f"⚠️ Пропускаем {data['email']}: 401 Unauthorized при получении google_fitness_api_token")
+            logger.warning(
+                f"⚠️ Пропускаем {data['email']}: 401 Unauthorized при получении google_fitness_api_token"
+            )
             return None
         resp.raise_for_status()
         return resp.json().get("access_token")
     except requests.RequestException as e:
-        logger.error(f"Ошибка при получении Google Fitness API токена для {data['email']}: {e}")
+        logger.error(
+            f"Ошибка при получении Google Fitness API токена для {data['email']}: {e}"
+        )
         return None
 
 
@@ -258,12 +267,12 @@ def fetch_access_token(data: dict) -> Optional[str]:
     """
     try:
         resp = session.get(
-            data["access_token_url"],
-            headers={"Accept": "application/json"},
-            timeout=10
+            data["access_token_url"], headers={"Accept": "application/json"}, timeout=10
         )
         if resp.status_code == 401:
-            logger.warning(f"⚠️ Пропускаем {data['email']}: 401 Unauthorized при получении access_token")
+            logger.warning(
+                f"⚠️ Пропускаем {data['email']}: 401 Unauthorized при получении access_token"
+            )
             return None
         resp.raise_for_status()
         return resp.json().get("access_token")
@@ -272,32 +281,35 @@ def fetch_access_token(data: dict) -> Optional[str]:
         return None
 
 
-def fetch_fitness_data(
-    token: str,
-    data_type: str,
-    start_ms: int,
-    end_ms: int
-) -> dict:
+def fetch_fitness_data(token: str, data_type: str, start_ms: int, end_ms: int) -> dict:
     """
-    Делает POST-запрос в Google Fitness API, чтобы взять данные за период [start_ms, end_ms]
+    Выполняет запрос к Google Fitness API для указанного data_type за период [start_ms, end_ms].
+    URLGeneratorInterface теперь отвечает за выполнение запроса.
     """
+    # Подготовка заголовков и тела
     body = {
         "aggregateBy": [{"dataTypeName": data_type}],
         "startTimeMillis": start_ms,
         "endTimeMillis": end_ms,
     }
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {token}"
-    }
-    resp = session.post(
-        settings.GOOGLE_FITNESS_ENDPOINT,
-        json=body,
-        headers=headers,
-        timeout=15
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
+
+    # Конвертация времени в ISO-8601 с Z
+    start_iso = datetime.datetime.utcfromtimestamp(start_ms / 1000).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
     )
-    resp.raise_for_status()
-    return resp.json()
+    end_iso = datetime.datetime.utcfromtimestamp(end_ms / 1000).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
+
+    # Запрос через генератор
+    url_generator = settings.API_URL_BY_DATA_TYPES.get(data_type, default_url_generator)
+    return url_generator.request(
+        session=session,
+        headers=headers,
+        body=body,
+        url_params={"start_time": start_iso, "end_time": end_iso, "activity_type": 72},
+    )
 
 
 async def fetch_full_period(
@@ -306,7 +318,7 @@ async def fetch_full_period(
     data_type: str,
     start_ms: int,
     end_ms: int,
-    email: str
+    email: str,
 ) -> int:
     """
     Для одного data_type бежит по чанкам, считает прогресс, парсит данные и отправляет их на внешний сервис.
@@ -327,15 +339,19 @@ async def fetch_full_period(
 
         # 1) Запрос в Google Fitness API
         try:
-            payload = fetch_fitness_data(google_fitness_api_token, data_type, current_start, current_end)
+            payload = fetch_fitness_data(
+                google_fitness_api_token, data_type, current_start, current_end
+            )
         except Exception as e:
-            logger.error(f"❌ Ошибка ({data_type}) [{current_start}-{current_end}]: {e}")
+            logger.error(
+                f"❌ Ошибка ({data_type}) [{current_start}-{current_end}]: {e}"
+            )
             # Прерываем цикл по этому data_type и возвращаем то, что уже отправили
             return sent_records_count
 
         # 2) Вычисляем прогресс
-        buckets = payload.get("bucket", [])
-        last_ts = max((int(b.get("startTimeMillis", 0)) for b in buckets), default=None)
+        last_ts = max((int(b.get("startTimeMillis", 0)) for b in payload), default=None)
+        curr_t = convert_milliseconds_to_utc(current_start)
         if last_ts is not None and total_duration > 0:
             local_pct = (last_ts - start_ms) / total_duration * 100
             overall = min(int(offset + (local_pct * weight / 100.0)), 100)
@@ -343,27 +359,28 @@ async def fetch_full_period(
             try:
                 await redis_client.set(
                     f"{settings.REDIS_DATA_COLLECTION_GOOGLE_FITNESS_API_PROGRESS_BAR_NAMESPACE}{email}",
-                    bar
+                    bar,
                 )
-                logger.info(f"[{data_type}] Прогресс: local {int(local_pct)}% → overall {overall}%")
+                logger.info(
+                    f"[{data_type}] Прогресс: local {int(local_pct)}% → overall {overall}%"
+                )
             except Exception as e:
                 logger.error(f"Не удалось обновить прогресс в Redis для {email}: {e}")
 
         # 3) Парсим каждый bucket и отправляем
-        for bucket in buckets:
+        for bucket in payload:
             data_processors = data_processors_by_datatype.get(data_type)
             if not data_processors:
                 continue
             for data_processor in data_processors:
                 curr_data_type, processed = data_processor.process(bucket)
-                
+
                 if not processed:
                     continue
 
                 # Пропускаем, если нет сопоставления в GOOGLE_TO_DATA_TYPE
                 url_data_type = GOOGLE_TO_DATA_TYPE.get(curr_data_type)
-                
-                
+
                 if not url_data_type:
                     continue
 
@@ -373,19 +390,18 @@ async def fetch_full_period(
                 )
                 headers = {
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {access_token}"
+                    "Authorization": f"Bearer {access_token}",
                 }
 
                 try:
                     resp = session.post(
-                        url,
-                        json=processed,
-                        headers=headers,
-                        timeout=10
+                        url, json=processed, headers=headers, timeout=10
                     )
                     resp.raise_for_status()
                     sent_records_count += len(processed)
-                    logger.info(f"→ Отправлено {len(processed)} записей '{data_type}' на {url}")
+                    logger.info(
+                        f"→ Отправлено {len(processed)} записей '{data_type}' на {url}"
+                    )
                 except Exception as e:
                     logger.error(f"❌ Ошибка отправки {data_type} на {url}: {e}")
 
@@ -396,7 +412,7 @@ async def fetch_full_period(
     try:
         await redis_client.set(
             f"{settings.REDIS_DATA_COLLECTION_GOOGLE_FITNESS_API_PROGRESS_BAR_NAMESPACE}{email}",
-            json.dumps({"type": "google_fitness_api", "progress": final_overall})
+            json.dumps({"type": "google_fitness_api", "progress": final_overall}),
         )
         logger.info(f"[{data_type}] Завершён: overall {final_overall}%")
     except Exception as e:
@@ -422,7 +438,7 @@ async def main():
     if not user_email:
         logger.error("Не указан email пользователя в JSON")
         sys.exit(1)
-    
+
     logger.info(f"Выполняется для пользователя: {user_email}")
 
     # 2) Получаем токены
@@ -472,7 +488,7 @@ async def main():
             dt,
             settings.START_MS,
             settings.END_MS,
-            user_email
+            user_email,
         )
         total_sent += sent_for_type
         logger.info(f"Закончили {dt}. Отправлено записей: {sent_for_type}")
