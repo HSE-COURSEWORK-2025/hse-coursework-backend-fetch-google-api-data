@@ -2,6 +2,7 @@ import asyncio
 import argparse
 import logging
 import json
+import math
 import sys
 import datetime
 import certifi
@@ -120,7 +121,8 @@ class SleepStagesDataProcessor(DataProcessorInterface):
     def process(self, bucket: Any) -> Tuple[str, List[dict]]:
         results: list[dict] = []
         parsed_bucket = BucketModel.model_validate(bucket)
-        time_str = convert_milliseconds_to_utc(int(parsed_bucket.startTimeMillis))
+        start_time_str = convert_milliseconds_to_utc(int(parsed_bucket.startTimeMillis))
+        end_time_str = convert_milliseconds_to_utc(int(parsed_bucket.endTimeMillis))
 
         for dataset in parsed_bucket.dataset:
             result_arr = []
@@ -143,7 +145,7 @@ class SleepStagesDataProcessor(DataProcessorInterface):
                     result_arr.append({"endTime":end_time_str,"stage":stage_val,"startTime":start_time_str})
             if result_arr:
                 results.append({
-                    "timestamp": time_str,
+                    "timestamp": start_time_str,
                     "value": json.dumps(result_arr)
                 })
         return self.data_type, results
@@ -159,28 +161,31 @@ class SleepTimeDataProcessor(DataProcessorInterface):
         # Берём время начала и конца сессии в миллисекундах
         start_time_ms = parsed_bucket.startTimeMillis
         end_time_ms   = parsed_bucket.endTimeMillis
+
         if start_time_ms is None or end_time_ms is None:
             return self.data_type, results
 
         # Конвертируем start_time_ms в строку вида "DD Month YYYY HH:MM:SS.mmm UTC"
-        time_str = convert_milliseconds_to_utc(int(start_time_ms))
-
-        # Считаем длительность сна в миллисекундах
-        sleep_time_ms = None
-        if parsed_bucket.dataset:
-            if parsed_bucket.dataset[0].point:
-                first_stage_start_time_nanos = parsed_bucket.dataset[0].point[0].startTimeNanos
-                last_stage_end_time_nanos = parsed_bucket.dataset[0].point[0].endTimeNanos
-                sleep_time_ms = (int(last_stage_end_time_nanos) - int(first_stage_start_time_nanos)) / 1_000_000
-
-        else:
-            sleep_time_ms = int(end_time_ms) - int(start_time_ms)
         
-        if sleep_time_ms is not None:
-            results.append({
-                "timestamp": time_str,
-                "value": sleep_time_ms
-            })
+        # Считаем длительность сна в миллисекундах
+        sleep_time_min = None
+        if parsed_bucket.dataset:
+            for sleep_session in parsed_bucket.dataset[0].point:
+                start_time_ns = sleep_session.startTimeNanos
+                end_time_ns = sleep_session.endTimeNanos
+
+                sleep_time_ms = (int(end_time_ns) - int(start_time_ns)) / 1_000_000
+                sleep_time_min = sleep_time_ms / 60000.0
+                sleep_time_min = int(math.ceil(sleep_time_min))
+
+                sleep_start_time = convert_nanoseconds_to_utc(start_time_ns)
+                sleep_end_time = convert_nanoseconds_to_utc(end_time_ns)
+
+                if sleep_time_min is not None:
+                    results.append({
+                        "timestamp": sleep_start_time,
+                        "value": sleep_time_min
+                    })
 
         return self.data_type, results
 
