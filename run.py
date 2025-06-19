@@ -19,10 +19,8 @@ from models import BucketModel
 from abc import ABC
 
 
-# Настройки
 settings = Settings()
 
-# Конфигурация логирования
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -32,12 +30,10 @@ logger = logging.getLogger(__name__)
 
 
 GOOGLE_TO_DATA_TYPE: Dict[str, str] = {
-    # # float-типы
     "com.google.oxygen_saturation": "BloodOxygenData",
     "com.google.heart_rate.bpm": "HeartRateRecord",
     "com.google.height": "HeightRecord",
     "com.google.weight": "WeightRecord",
-    # int-типы
     "com.google.activity.segment": "ActivitySegmentRecord",
     "com.google.activity.exercise": "ExerciseSessionRecord",
     "com.google.calories.bmr": "BasalMetabolicRateRecord",
@@ -60,7 +56,6 @@ GOOGLE_TO_DATA_TYPE: Dict[str, str] = {
     "com.google.nutrition": "NutritionData",
 }
 
-# === Настраиваем сессию с retry и актуальным CA ===
 session = requests.Session()
 retry_strategy = Retry(
     total=3,
@@ -72,14 +67,12 @@ adapter = HTTPAdapter(max_retries=retry_strategy)
 session.mount("https://", adapter)
 session.verify = certifi.where()
 
-# === Собираем все data_types из настроек в один список ===
 all_data_types = []
 for scope in settings.SCOPES or []:
     types = settings.DATA_TYPES_BY_SCOPE.get(scope, [])
     all_data_types.extend([dt for dt in types if dt.startswith("com.google")])
 
 total_types = len(all_data_types)
-# Вес одной «части» прогресса
 weight = 100.0 / total_types if total_types > 0 else 0.0
 
 
@@ -169,19 +162,15 @@ class SleepTimeDataProcessor(DataProcessorInterface):
         results: list[dict] = []
         parsed_bucket = BucketModel.model_validate(bucket)
 
-        # Берём время начала и конца сессии в миллисекундах
         start_time_ms = parsed_bucket.startTimeMillis
         end_time_ms = parsed_bucket.endTimeMillis
 
         if start_time_ms is None or end_time_ms is None:
             return self.data_type, results
 
-        # Конвертируем start_time_ms в строку вида "DD Month YYYY HH:MM:SS.mmm UTC"
-
-        # Считаем длительность сна в миллисекундах
         duration_ms = end_time_ms - start_time_ms
-        duration_min = duration_ms / (1000 * 60)  # из мс → минуты
-        duration_min = int(math.ceil(duration_min))  # округляем вверх до целой минуты
+        duration_min = duration_ms / (1000 * 60)
+        duration_min = int(math.ceil(duration_min))
 
         results.append(
             {
@@ -286,7 +275,6 @@ def fetch_fitness_data(token: str, data_type: str, start_ms: int, end_ms: int) -
     Выполняет запрос к Google Fitness API для указанного data_type за период [start_ms, end_ms].
     URLGeneratorInterface теперь отвечает за выполнение запроса.
     """
-    # Подготовка заголовков и тела
     body = {
         "aggregateBy": [{"dataTypeName": data_type}],
         "startTimeMillis": start_ms,
@@ -294,7 +282,6 @@ def fetch_fitness_data(token: str, data_type: str, start_ms: int, end_ms: int) -
     }
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
 
-    # Конвертация времени в ISO-8601 с Z
     start_iso = datetime.datetime.utcfromtimestamp(start_ms / 1000).strftime(
         "%Y-%m-%dT%H:%M:%S.000Z"
     )
@@ -302,7 +289,6 @@ def fetch_fitness_data(token: str, data_type: str, start_ms: int, end_ms: int) -
         "%Y-%m-%dT%H:%M:%S.000Z"
     )
 
-    # Запрос через генератор
     url_generator = settings.API_URL_BY_DATA_TYPES.get(data_type, default_url_generator)
     return url_generator.request(
         session=session,
@@ -337,7 +323,6 @@ async def fetch_full_period(
     while current_start < end_ms:
         current_end = min(current_start + settings.CHUNK_DURATION_MS, end_ms)
 
-        # 1) Запрос в Google Fitness API
         try:
             payload = fetch_fitness_data(
                 google_fitness_api_token, data_type, current_start, current_end
@@ -346,10 +331,8 @@ async def fetch_full_period(
             logger.error(
                 f"❌ Ошибка ({data_type}) [{current_start}-{current_end}]: {e}"
             )
-            # Прерываем цикл по этому data_type и возвращаем то, что уже отправили
             return sent_records_count
 
-        # 2) Вычисляем прогресс
         last_ts = max((int(b.get("startTimeMillis", 0)) for b in payload), default=None)
         curr_t = convert_milliseconds_to_utc(current_start)
         if last_ts is not None and total_duration > 0:
@@ -367,7 +350,6 @@ async def fetch_full_period(
             except Exception as e:
                 logger.error(f"Не удалось обновить прогресс в Redis для {email}: {e}")
 
-        # 3) Парсим каждый bucket и отправляем
         for bucket in payload:
             data_processors = data_processors_by_datatype.get(data_type)
             if not data_processors:
@@ -378,7 +360,6 @@ async def fetch_full_period(
                 if not processed:
                     continue
 
-                # Пропускаем, если нет сопоставления в GOOGLE_TO_DATA_TYPE
                 url_data_type = GOOGLE_TO_DATA_TYPE.get(curr_data_type)
 
                 if not url_data_type:
@@ -407,7 +388,6 @@ async def fetch_full_period(
 
         current_start = current_end
 
-    # 4) Финальный прогресс для этого data_type
     final_overall = min(int(offset + weight), 100)
     try:
         await redis_client.set(
@@ -432,7 +412,6 @@ async def main():
     )
     args = parser.parse_args()
 
-    # 1) Загружаем данные пользователя
     user = load_user(args.user_json)
     user_email = user.get("email")
     if not user_email:
@@ -441,7 +420,6 @@ async def main():
 
     logger.info(f"Выполняется для пользователя: {user_email}")
 
-    # 2) Получаем токены
     google_fitness_api_token = fetch_google_fitness_api_token(user)
     if not google_fitness_api_token:
         logger.error("Не удалось получить Google Fitness API токен, выходим")
@@ -452,14 +430,12 @@ async def main():
         logger.error("Не удалось получить общий access token, выходим")
         sys.exit(0)
 
-    # 3) Подключаем Redis
     try:
         await redis_client.connect()
     except Exception as e:
         logger.error(f"Не удалось подключиться к Redis: {e}")
         sys.exit(1)
 
-    # 4) Уведомление о старте
     start_time = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     subject_start = "[GoogleFitness] Начало выгрузки данных"
     body_start = f"""
@@ -478,7 +454,6 @@ async def main():
     except Exception as e:
         logger.error(f"Не удалось отправить email-уведомление о старте: {e}")
 
-    # 5) Обрабатываем все data_types по порядку
     total_sent = 0
     for idx, dt in enumerate(all_data_types, start=1):
         logger.info(f"Обработка типа данных [{idx}/{total_types}]: {dt}")
@@ -493,7 +468,6 @@ async def main():
         total_sent += sent_for_type
         logger.info(f"Закончили {dt}. Отправлено записей: {sent_for_type}")
 
-    # 6) Уведомление о завершении
     finish_time = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     subject_end = "[GoogleFitness] Завершение выгрузки данных"
     body_end = f"""
@@ -514,7 +488,6 @@ async def main():
     except Exception as e:
         logger.error(f"Не удалось отправить email-уведомление о завершении: {e}")
 
-    # 7) Отключаем Redis и выходим
     try:
         await redis_client.disconnect()
     except Exception as e:

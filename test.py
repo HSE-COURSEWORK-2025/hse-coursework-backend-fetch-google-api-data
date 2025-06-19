@@ -2,10 +2,12 @@ from typing import List, Optional, Any
 from pydantic import BaseModel, field_validator
 import datetime
 
+
 class ValueModel(BaseModel):
     intVal: Optional[int] = None
     fpVal: Optional[float] = None
     mapVal: Optional[Any] = None
+
 
 class PointModel(BaseModel):
     startTimeNanos: Optional[int] = None
@@ -14,7 +16,7 @@ class PointModel(BaseModel):
     originDataSourceId: Optional[str] = None
     value: List[ValueModel] = []
 
-    @field_validator('startTimeNanos', 'endTimeNanos', mode='before')
+    @field_validator("startTimeNanos", "endTimeNanos", mode="before")
     @staticmethod
     def parse_int_fields(v):
         if v is None:
@@ -26,27 +28,38 @@ class PointModel(BaseModel):
 
     def to_interval(self) -> dict:
         """Convert nanosecond timestamps to ISO datetime strings"""
+
         def nanos_to_utc(nanos: int) -> str:
             ts_sec = nanos / 1_000_000_000
             dt = datetime.datetime.utcfromtimestamp(ts_sec)
             micros = int(nanos % 1_000_000_000) // 1000
-            return dt.strftime('%Y-%m-%dT%H:%M:%S.') + f"{micros:06d}Z"
+            return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{micros:06d}Z"
 
         return {
-            'start': nanos_to_utc(self.startTimeNanos) if self.startTimeNanos is not None else None,
-            'end': nanos_to_utc(self.endTimeNanos) if self.endTimeNanos is not None else None,
+            "start": (
+                nanos_to_utc(self.startTimeNanos)
+                if self.startTimeNanos is not None
+                else None
+            ),
+            "end": (
+                nanos_to_utc(self.endTimeNanos)
+                if self.endTimeNanos is not None
+                else None
+            ),
         }
+
 
 class DataSetModel(BaseModel):
     dataSourceId: Optional[str] = None
     point: List[PointModel] = []
+
 
 class BucketModel(BaseModel):
     startTimeMillis: Optional[int] = None
     endTimeMillis: Optional[int] = None
     dataset: List[DataSetModel] = []
 
-    @field_validator('startTimeMillis', 'endTimeMillis', mode='before')
+    @field_validator("startTimeMillis", "endTimeMillis", mode="before")
     @staticmethod
     def parse_millis(v):
         if v is None:
@@ -67,38 +80,40 @@ class BucketModel(BaseModel):
                     continue
                 first = pt.value[0]
                 val = first.intVal if first.intVal is not None else first.fpVal
-                records.append({**pt.to_interval(), 'value': val})
+                records.append({**pt.to_interval(), "value": val})
         return records
 
-# Пример использования:
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     example_bucket = {
-        'startTimeMillis': '1744189562929',
-        'endTimeMillis': '1746781562929',
-        'dataset': [{
-            'dataSourceId': 'derived:com.google.sleep.segment:merged',
-            'point': []  # может отсутствовать данные
-        }]
+        "startTimeMillis": "1744189562929",
+        "endTimeMillis": "1746781562929",
+        "dataset": [
+            {"dataSourceId": "derived:com.google.sleep.segment:merged", "point": []}
+        ],
     }
 
     bucket = BucketModel.model_validate(example_bucket)
     sleep_records = bucket.get_sleep_records()
-    print('Parsed records:', sleep_records)  # []
+    print("Parsed records:", sleep_records)
 
-    # С реальными данными с точками:
     example_bucket_full = {
-        'startTimeMillis': '1744189562929',
-        'endTimeMillis': '1746781562929',
-        'dataset': [{
-            'dataSourceId': 'derived:com.google.sleep.segment:merged',
-            'point': [{
-                'startTimeNanos': '1744234740000000000',
-                'endTimeNanos': '1744235819999000000',
-                'dataTypeName': 'com.google.sleep.segment',
-                'originDataSourceId': 'raw:com.google.sleep.segment:...',
-                'value': [{'intVal': 4, 'mapVal': []}]
-            }]
-        }]
+        "startTimeMillis": "1744189562929",
+        "endTimeMillis": "1746781562929",
+        "dataset": [
+            {
+                "dataSourceId": "derived:com.google.sleep.segment:merged",
+                "point": [
+                    {
+                        "startTimeNanos": "1744234740000000000",
+                        "endTimeNanos": "1744235819999000000",
+                        "dataTypeName": "com.google.sleep.segment",
+                        "originDataSourceId": "raw:com.google.sleep.segment:...",
+                        "value": [{"intVal": 4, "mapVal": []}],
+                    }
+                ],
+            }
+        ],
     }
     bucket_full = BucketModel.model_validate(example_bucket_full)
-    print('Records:', bucket_full.get_sleep_records())
+    print("Records:", bucket_full.get_sleep_records())
